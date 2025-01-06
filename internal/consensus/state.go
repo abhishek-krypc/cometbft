@@ -17,6 +17,7 @@ import (
 	cmtproto "github.com/cometbft/cometbft/api/cometbft/types/v2"
 	cfg "github.com/cometbft/cometbft/config"
 	"github.com/cometbft/cometbft/crypto"
+	"github.com/cometbft/cometbft/internal/consensus/raft"
 	cstypes "github.com/cometbft/cometbft/internal/consensus/types"
 	cmtevents "github.com/cometbft/cometbft/internal/events"
 	"github.com/cometbft/cometbft/internal/fail"
@@ -141,6 +142,10 @@ type State struct {
 	// a buffer to store the concatenated proposal block parts (serialization format)
 	// should only be accessed under the cs.mtx lock
 	serializedBlockBuffer []byte
+
+	raftProposer *raft.RaftProposer
+
+	nodeInfo p2p.NodeInfo
 }
 
 // StateOption sets an optional parameter on the State.
@@ -1071,6 +1076,14 @@ func (cs *State) enterNewRound(height int64, round int32) {
 		return
 	}
 
+	// Update proposer using Raft before new round
+	if err := cs.Validators.UpdateProposerFromRaft(height, round); err != nil {
+		cs.Logger.Error("Failed to update proposer from Raft in new round",
+			"height", height,
+			"round", round,
+			"error", err)
+	}
+
 	if now := cmttime.Now(); cs.StartTime.After(now) {
 		logger.Debug("Need to set a buffer and log message here for sanity", "start_time", cs.StartTime, "now", now)
 	}
@@ -1152,6 +1165,20 @@ func (cs *State) needProofBlock(height int64) bool {
 func (cs *State) enterPropose(height int64, round int32) {
 	logger := cs.Logger.With("height", height, "round", round)
 
+	// Update proposer before checking if we should propose
+	if err := cs.Validators.UpdateProposerFromRaft(height, round); err != nil {
+		cs.Logger.Error("Failed to update proposer from Raft in propose",
+			"height", height,
+			"round", round,
+			"error", err)
+	}
+
+	// if !cs.isProposer(cs.privValidatorPubKey.Address()) {
+	// 	cs.Logger.Info("enterPropose: not proposer")
+	// 	cs.scheduleTimeout(cs.config.Propose(round), height, round, cstypes.RoundStepPropose)
+	// 	return
+	// }
+
 	if cs.Height != height || round < cs.Round || (cs.Round == round && cstypes.RoundStepPropose <= cs.Step) {
 		logger.Debug(
 			"entering propose step with invalid args",
@@ -1219,8 +1246,27 @@ func (cs *State) enterPropose(height int64, round int32) {
 	}
 }
 
+// func (cs *State) isProposer(address []byte) bool {
+// 	return bytes.Equal(cs.Validators.GetProposer().Address, address)
+// }
+
 func (cs *State) isProposer(address []byte) bool {
-	return bytes.Equal(cs.Validators.GetProposer().Address, address)
+	if cs.raftProposer == nil {
+		// Fallback to original behavior if Raft is not initialized
+		return bytes.Equal(cs.Validators.GetProposer().Address, address)
+	}
+
+	proposer, err := cs.raftProposer.GetCurrentProposer(cs.Height, cs.Round)
+	if err != nil {
+		cs.Logger.Error("Failed to get proposer from Raft, falling back to default",
+			"height", cs.Height,
+			"round", cs.Round,
+			"error", err,
+		)
+		return bytes.Equal(cs.Validators.GetProposer().Address, address)
+	}
+
+	return bytes.Equal(proposer, address)
 }
 
 func (cs *State) defaultDecideProposal(height int64, round int32) {
@@ -2789,4 +2835,51 @@ func proposerWaitTime(lt cmttime.Source, bt time.Time) time.Duration {
 // isPBTSEnabled returns true if PBTS is enabled at the current height.
 func (cs *State) isPBTSEnabled(height int64) bool {
 	return cs.state.ConsensusParams.Feature.PbtsEnabled(height)
+}
+
+// InitializeRaftProposer initializes and starts the Raft proposer service
+func (cs *State) InitializeRaftProposer() error {
+	// Get node address from config
+	listenAddr := cs.config.RaftConfig.ListenAddress
+	if listenAddr == "" {
+		// If not specified, use default or derive from P2P address
+		listenAddr = "tcp://0.0.0.0:26657" // You can make this configurable
+	}
+
+	store, err := raft.NewRaftStore(&cs.config.RaftConfig)
+	if err != nil {
+		return err
+	}
+
+	metrics := raft.NewMetrics()
+
+	rp, err := raft.NewRaftProposer(
+		cs.config,
+		cs.Logger,
+		store,
+		metrics,
+	)
+	if err != nil {
+		return err
+	}
+
+	cs.raftProposer = rp
+	cs.Validators.RaftProposer = rp
+
+	// Bootstrap or join cluster based on configuration
+	if cs.config.RaftConfig.Bootstrap {
+		return rp.Bootstrap()
+	} else if cs.config.RaftConfig.JoinAddress != "" {
+		return rp.JoinCluster(cs.config.RaftConfig.JoinAddress)
+	}
+
+	return nil
+}
+
+func (cs *State) SetNodeInfo(nodeInfo p2p.NodeInfo) error {
+	if cs.raftProposer == nil {
+		return fmt.Errorf("raft proposer not initialized")
+	}
+
+	return cs.raftProposer.UpdateNodeInfo(nodeInfo, cs.config.RaftConfig.Bootstrap, cs.config.RaftConfig.JoinAddress)
 }

@@ -33,6 +33,7 @@ const (
 	DefaultCometDir  = ".cometbft"
 	DefaultConfigDir = "config"
 	DefaultDataDir   = "data"
+	DefaultRaftDir   = "raft"
 
 	DefaultConfigFileName  = "config.toml"
 	DefaultGenesisJSONName = "genesis.json"
@@ -1265,6 +1266,33 @@ type ConsensusConfig struct {
 	PeerGossipIntraloopSleepDuration time.Duration `mapstructure:"peer_gossip_intraloop_sleep_duration"` // upper bound on randomly selected values
 
 	DoubleSignCheckHeight int64 `mapstructure:"double_sign_check_height"`
+
+	// Raft-specific configuration
+	RaftConfig RaftConfig `mapstructure:"raft"`
+}
+
+type RaftConfig struct {
+	// Maximum number of snapshots to retain
+	RetainSnapshotCount int `mapstructure:"retain_snapshot_count"`
+
+	// Interval for taking snapshots
+	SnapshotInterval string `mapstructure:"snapshot_interval"`
+
+	// Number of Raft logs to keep
+	MaxLogFiles int `mapstructure:"max_log_files"`
+
+	// Enable Raft metrics
+	EnableMetrics bool `mapstructure:"enable_metrics"`
+
+	// Base directory for Raft data
+	RaftDir string `mapstructure:"raft_dir"`
+
+	// Listen address for Raft transport
+	ListenAddress string `mapstructure:"laddr"`
+
+	Bootstrap bool `mapstructure:"bootstrap"`
+
+	JoinAddress string `mapstructure:"join_address"`
 }
 
 // DefaultConsensusConfig returns a default configuration for the consensus service.
@@ -1282,6 +1310,16 @@ func DefaultConsensusConfig() *ConsensusConfig {
 		PeerQueryMaj23SleepDuration:      2000 * time.Millisecond,
 		PeerGossipIntraloopSleepDuration: 0 * time.Second,
 		DoubleSignCheckHeight:            int64(0),
+		RaftConfig: RaftConfig{
+			RetainSnapshotCount: 3,
+			SnapshotInterval:    "24h",
+			MaxLogFiles:         10,
+			EnableMetrics:       true,
+			RaftDir:             filepath.Join(DefaultCometDir, DefaultDataDir),
+			ListenAddress:       "127.0.0.1:50400",
+			Bootstrap:           true,
+			JoinAddress:         "",
+		},
 	}
 }
 

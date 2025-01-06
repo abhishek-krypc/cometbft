@@ -581,6 +581,16 @@ func NewNodeWithCliParams(ctx context.Context,
 		option(node)
 	}
 
+	// Initialize Raft proposer
+	if err := consensusState.InitializeRaftProposer(); err != nil {
+		return nil, err
+	}
+
+	// Set NodeInfo after initialization
+	if err := consensusState.SetNodeInfo(nodeInfo); err != nil {
+		return nil, err
+	}
+
 	return node, nil
 }
 

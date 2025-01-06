@@ -13,6 +13,7 @@ import (
 	cmtproto "github.com/cometbft/cometbft/api/cometbft/types/v2"
 	"github.com/cometbft/cometbft/crypto/merkle"
 	"github.com/cometbft/cometbft/crypto/tmhash"
+	tmlog "github.com/cometbft/cometbft/libs/log"
 	cmtmath "github.com/cometbft/cometbft/libs/math"
 )
 
@@ -62,6 +63,13 @@ type ValidatorSet struct {
 	totalVotingPower int64
 	// true if all validators have the same type of public key or if the set is empty.
 	allKeysHaveSameType bool
+
+	RaftProposer RaftProposerInterface
+}
+
+type RaftProposerInterface interface {
+	GetCurrentProposer(height int64, round int32) (Address, error)
+	GetLogger() tmlog.Logger
 }
 
 // NewValidatorSet initializes a ValidatorSet by copying over the values from
@@ -352,13 +360,83 @@ func (vals *ValidatorSet) TotalVotingPower() int64 {
 // GetProposer returns the current proposer. If the validator set is empty, nil
 // is returned.
 func (vals *ValidatorSet) GetProposer() (proposer *Validator) {
-	if len(vals.Validators) == 0 {
-		return nil
-	}
+	// if len(vals.Validators) == 0 {
+	// 	return nil
+	// }
+	// if vals.Proposer == nil {
+	// 	vals.Proposer = vals.findProposer()
+	// }
+	// return vals.Proposer.Copy()
+
 	if vals.Proposer == nil {
+
+		// Original proposer selection logic as fallback
 		vals.Proposer = vals.findProposer()
 	}
-	return vals.Proposer.Copy()
+	return vals.Proposer
+}
+
+func (vals *ValidatorSet) UpdateProposerFromRaft(height int64, round int32) error {
+	if vals.RaftProposer == nil {
+		return nil
+	}
+
+	proposerAddr, err := vals.RaftProposer.GetCurrentProposer(height, round)
+	if err != nil {
+		vals.RaftProposer.GetLogger().Error("Failed to get proposer from Raft",
+			"height", height,
+			"round", round,
+			"error", err)
+		return err
+	}
+
+	// Find the validator with the returned address
+	for _, val := range vals.Validators {
+		if bytes.Equal(val.Address, proposerAddr) {
+			vals.Proposer = val
+			vals.RaftProposer.GetLogger().Info("Updated proposer using Raft",
+				"height", height,
+				"round", round,
+				"proposer", val.Address,
+			)
+			return nil
+		}
+	}
+
+	return fmt.Errorf("raft proposer not found in validator set")
+}
+
+func (vals *ValidatorSet) getRaftProposer(height int64, round int32) *Validator {
+	if vals.RaftProposer == nil {
+		return nil
+	}
+
+	proposerAddr, err := vals.RaftProposer.GetCurrentProposer(height, round)
+	if err != nil {
+		// Log error and return nil to fallback to default proposer selection
+		vals.RaftProposer.GetLogger().Error("Failed to get proposer from Raft",
+			"height", height,
+			"round", round,
+			"error", err)
+		return nil
+	}
+
+	// Find the validator with the returned address
+	for _, val := range vals.Validators {
+		if bytes.Equal(val.Address, proposerAddr) {
+			vals.RaftProposer.GetLogger().Info("Selected proposer using Raft",
+				"height", height,
+				"round", round,
+				"proposer", val.Address,
+			)
+			return val
+		}
+	}
+
+	// If proposer address from Raft doesn't match any validator
+	vals.RaftProposer.GetLogger().Error("Raft proposer not found in validator set",
+		"proposer_address", proposerAddr)
+	return nil
 }
 
 func (vals *ValidatorSet) findProposer() *Validator {
